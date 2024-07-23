@@ -188,5 +188,31 @@ def test_wavenet(
     assert torch.all(x.grad[~mask] == 0)
 
 
-if __name__ == "__main__":
-    test_causal_conv(8192, 7, 5, 2)
+@pytest.mark.parametrize(
+    "batch_size,seq_len,n_blocks,n_layers_per_block,dim,kernel_size,dilation",
+    [(3, 128, 2, 2, 7, 5, 2)],
+)
+@torch.inference_mode()
+def test_wavenet_sampling(
+    batch_size: int,
+    seq_len: int,
+    n_blocks: int,
+    n_layers_per_block: int,
+    dim: int,
+    kernel_size: int,
+    dilation: int,
+):
+
+    wavenet = Wavenet(
+        n_blocks=n_blocks,
+        n_layers_per_block=n_layers_per_block,
+        in_channels=1,
+        dim=dim,
+        out_channels=dim,
+        kernel_size=kernel_size,
+        dilation=dilation,
+    )
+
+    sampled = wavenet.sample(n=batch_size, steps=seq_len)
+    assert sampled.shape[0] == batch_size
+    assert sampled.shape[-1] == seq_len

@@ -111,6 +111,10 @@ class Wavenet(nn.Module):
             nn.Conv1d(dim, out_channels, 1),
         )
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def forward(self, x):
         x = self.in_conv(x)
 
@@ -121,3 +125,16 @@ class Wavenet(nn.Module):
 
         logits = self.out_conv(x)
         return logits
+
+    @torch.inference_mode()
+    def sample(self, n: int, steps: int):
+        sampled = torch.zeros(n, 1, 1, device=self.device)
+        for _ in range(steps):
+            logits = self.forward(sampled)
+
+            # greedy
+            x = logits[..., -1:].argmax(dim=1, keepdim=True)
+            sampled = torch.cat([sampled, x], dim=-1)
+
+        sampled = sampled[..., 1:]
+        return sampled
