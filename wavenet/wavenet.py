@@ -2,20 +2,37 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from wavenet.data import MuLaw, Tokenizer
+from dataclasses import dataclass
+from tqdm import tqdm
 
-class CausalConv(nn.Conv1d):
+
+@dataclass
+class WavenetDims:
+    n_blocks: int = 3
+    n_layers_per_block: int = 10
+    in_channels: int = 1
+    dim: int = 256
+    out_channels: int = 256
+    kernel_size: int = 2
+    dilation: int = 2
+
+
+class CausalConv1d(nn.Conv1d):
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int,
-        dilation: int,
+        dilation: int = 1,
+        bias: bool = True,
     ):
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
             dilation=dilation,
+            bias=bias,
         )
 
         # o = [i + 2*p - k - (k-1)*(d-1)]/s + 1
@@ -34,7 +51,7 @@ class WavenetLayer(nn.Module):
     def __init__(self, dim: int, kernel_size: int, dilation: int):
         super().__init__()
         self.conv = nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
-        self.dilconv = CausalConv(
+        self.dilconv = CausalConv1d(
             in_channels=dim,
             out_channels=2 * dim,
             kernel_size=kernel_size,
@@ -75,40 +92,33 @@ class WavenetBlock(nn.Module):
 
 
 class Wavenet(nn.Module):
-    def __init__(
-        self,
-        n_blocks: int,
-        n_layers_per_block: int,
-        in_channels: int,
-        dim: int,
-        out_channels: int,
-        kernel_size: int,
-        dilation: int,
-    ):
+    def __init__(self, dims: WavenetDims):
         super().__init__()
+        self.dims = dims
 
         self.in_conv = nn.Conv1d(
-            in_channels=in_channels,
-            out_channels=dim,
+            in_channels=dims.in_channels,
+            out_channels=dims.dim,
             kernel_size=1,
+            bias=False,
         )
 
         blocks = []
-        for _ in range(n_blocks):
+        for _ in range(dims.n_blocks):
             block = WavenetBlock(
-                n_layers=n_layers_per_block,
-                dim=dim,
-                kernel_size=kernel_size,
-                dilation=dilation,
+                n_layers=dims.n_layers_per_block,
+                dim=dims.dim,
+                kernel_size=dims.kernel_size,
+                dilation=dims.dilation,
             )
             blocks += [block]
         self.blocks = nn.ModuleList(blocks)
 
         self.out_conv = nn.Sequential(
             nn.GELU(),
-            nn.Conv1d(dim, dim, 1),
+            nn.Conv1d(dims.dim, dims.dim, 1),
             nn.GELU(),
-            nn.Conv1d(dim, out_channels, 1),
+            nn.Conv1d(dims.dim, dims.out_channels, 1),
         )
 
     @property
@@ -123,18 +133,29 @@ class Wavenet(nn.Module):
             x, xs = block(x)
             x_skip += xs
 
-        logits = self.out_conv(x)
-        return logits
+        logits = self.out_conv(x_skip)
+        return logits.transpose(1, 2)
 
     @torch.inference_mode()
-    def sample(self, n: int, steps: int):
+    def sample(
+        self,
+        n: int,
+        steps: int,
+        mulaw: MuLaw,
+        tokenizer: Tokenizer,
+        verbose: bool = False,
+    ):
         sampled = torch.zeros(n, 1, 1, device=self.device)
+        pbar = tqdm(desc="SAMPLING", total=steps, leave=False, disable=not verbose)
         for _ in range(steps):
             logits = self.forward(sampled)
-
             # greedy
-            x = logits[..., -1:].argmax(dim=1, keepdim=True)
-            sampled = torch.cat([sampled, x], dim=-1)
+            p = logits[..., -1, :].softmax(dim=-1)
+            s = p.multinomial(1).unsqueeze(1)
+            s = mulaw.decode(tokenizer.decode(s)).cuda()
+            sampled = torch.cat([sampled, s], dim=-1)
+
+            pbar.update()
 
         sampled = sampled[..., 1:]
         return sampled
