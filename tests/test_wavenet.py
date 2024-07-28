@@ -7,6 +7,7 @@ from wavenet.wavenet import (
     Wavenet,
     WavenetDims,
 )
+from wavenet.data import MuLaw, Tokenizer
 
 
 def init_weigths(module):
@@ -225,18 +226,29 @@ def test_wavenet_sampling(
     )
     wavenet = Wavenet(dims=dims)
 
-    # sampled = wavenet.sample(n=batch_size, steps=seq_len)
-    # assert sampled.shape[0] == batch_size
-    # assert sampled.shape[-1] == seq_len
+    mulaw = MuLaw(256)
+    tokenizer = Tokenizer(256)
 
-
-if __name__ == "__main__":
-    test_wavenet(
-        batch_size=3,
-        seq_len=8192,
-        n_blocks=2,
-        n_layers_per_block=10,
-        dim=7,
-        kernel_size=2,
-        dilation=2,
+    torch.manual_seed(0)
+    sampled = wavenet.sample(
+        n=batch_size,
+        steps=seq_len,
+        mulaw=mulaw,
+        tokenizer=tokenizer,
+        verbose=False,
+        use_cache=False,
     )
+
+    torch.manual_seed(0)
+    cache_sampled = wavenet.sample(
+        n=batch_size,
+        steps=seq_len,
+        mulaw=mulaw,
+        tokenizer=tokenizer,
+        verbose=False,
+        use_cache=True,
+    )
+
+    assert sampled.shape[0] == cache_sampled.shape[0] == batch_size
+    assert sampled.shape[-1] == cache_sampled.shape[-1] == seq_len
+    assert torch.allclose(sampled, cache_sampled)

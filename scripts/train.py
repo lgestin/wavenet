@@ -2,7 +2,7 @@ import os
 import torch
 
 from tqdm import tqdm
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from collections import defaultdict
 
 from torch.optim import AdamW
@@ -11,6 +11,7 @@ from torch.utils.data import Subset, DataLoader
 
 from wavenet.wavenet import Wavenet, WavenetDims
 from wavenet.data import LJDataset, Tokenizer, MuLaw, collate
+from data.spectrogram import MelSpectrogram
 
 
 @dataclass
@@ -34,6 +35,9 @@ class TrainingConfig:
 
 @dataclass
 class Checkpoint:
+    dims: WavenetDims
+    training_config: TrainingConfig
+
     state_dict: dict[str, torch.Tensor]
     optim_state_dict: dict[str, torch.Tensor]
 
@@ -41,11 +45,16 @@ class Checkpoint:
     best_loss: float
 
     def save(self, save_path: str):
-        torch.save({k: getattr(self, k) for k in self.__annotations__}, save_path)
+        save_dict = {k: getattr(self, k) for k in self.__annotations__}
+        save_dict["dims"] = asdict(save_dict["dims"])
+        save_dict["training_config"] = asdict(save_dict["training_config"])
+        torch.save(save_dict, save_path)
 
     @classmethod
     def load(cls, load_path: str):
         checkpoint = torch.load(load_path)
+        checkpoint["dims"] = WavenetDims(**checkpoint["dims"])
+        checkpoint["training_config"] = TrainingConfig(**checkpoint["training_config"])
         checkpoint = cls(**checkpoint)
         return checkpoint
 
@@ -88,10 +97,17 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
         collate_fn=collate_fn,
     )
 
+    mel_spectrogram = MelSpectrogram(
+        n_mels=80,
+        n_fft=1024,
+        hop_length=256,
+        sample_rate=22050,
+    ).to(device)
+
     assert dims.out_channels == q_levels
     model = Wavenet(dims=dims)
-    model = model.to(device)
-    model = torch.compile(model, disable=training_config.nocompile)
+    model_ = model.to(device)
+    model = torch.compile(model_, disable=training_config.nocompile)
 
     optim = AdamW(model.parameters(), lr=training_config.lr)
     scaler = torch.cuda.amp.GradScaler()
@@ -127,33 +143,46 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
 
     for sbatch in smp_dloader:
         for i, waveform in enumerate(sbatch.waveforms):
+            waveform = waveform.to(device)
+
+            mels = mel_spectrogram.mel(waveform).log()
+            mels = (mels - mels.min()) / (mels.max() - mels.min())
             writer.add_audio(f"orig/{i}.wav", waveform, 0, sample_rate=22050)
+            writer.add_image(f"orig/{i}.mel", mels.flip(1), 0)
+
             waveform = mulaw.decode(
                 tokenizer.decode(tokenizer.encode(mulaw.encode(waveform)))
             )
+            mels = mel_spectrogram.mel(waveform).log()
+            mels = (mels - mels.min()) / (mels.max() - mels.min())
             writer.add_audio(f"encoded/{i}.wav", waveform, 0, sample_rate=22050)
+            writer.add_image(f"encoded/{i}.mel", mels.flip(1))
             writer.add_histogram("orig", sbatch.tokens.reshape(-1), 0)
 
     pbar = tqdm(desc="TRAINING", total=training_config.max_steps)
     step, best_loss = 0, torch.inf
-    while step < training_config.max_steps:
+    while 1:
         for batch in train_dloader:
 
             # Sampling
-            if step % training_config.smp_steps == training_config.smp_steps - 1:
+            if step % training_config.smp_steps == 0:
                 model = model.eval()
                 with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
                     with torch.inference_mode():
-                        sampled = model.sample(
+                        sampled = model_.sample(
                             n=n_smp,
-                            steps=training_config.seq_len,
+                            steps=2 * 22050,
                             mulaw=mulaw,
                             tokenizer=tokenizer,
                             verbose=True,
+                            use_cache=True,
                         )
                 for i, smp in enumerate(sampled):
                     smp = 0.8 * (2 * (smp - smp.min()) / (smp.max() - smp.min()) - 1)
+                    mels = mel_spectrogram.mel(smp).log()
+                    mels = (mels - mels.min()) / (mels.max() - mels.min())
                     writer.add_audio(f"smp/{i}.wav", smp, step, sample_rate=22050)
+                    writer.add_image(f"smp/{i}.mel", mels.flip(1), step)
 
             # Validation
             if step % training_config.val_steps == 0:
@@ -176,7 +205,9 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
                 writer.add_histogram(f"val", sampled.reshape(-1), step)
 
                 checkpoint = Checkpoint(
-                    state_dict=model.state_dict(),
+                    dims=dims,
+                    training_config=training_config,
+                    state_dict=model_.state_dict(),
                     optim_state_dict=optim.state_dict(),
                     step=step,
                     best_loss=best_loss,
@@ -198,7 +229,9 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
 
             step += 1
             pbar.update()
-    return
+
+            if step > training_config.max_steps:
+                return
 
 
 if __name__ == "__main__":
