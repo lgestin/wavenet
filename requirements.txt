@@ -1,0 +1,6 @@
+torch==2.3.1
+torchaudio
+
+tqdm
+tensorboard
+simple-parsing
