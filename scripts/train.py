@@ -158,11 +158,14 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
         )
         writer.add_image(f"{tag}.mel", mels.flip(1), step)
 
+    # Log original files
     for sbatch in smp_dloader:
         for i, waveform in enumerate(sbatch.waveforms):
+            # original
             waveform = waveform.to(device)
             log_waveform(waveform, tag=f"orig/{i}", step=0)
 
+            # encoded waveform
             waveform = mulaw.decode(
                 tokenizer.decode(tokenizer.encode(mulaw.encode(waveform)))
             )
@@ -197,15 +200,16 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
                 for vbatch in tqdm(val_dloader, desc="VALIDATION", leave=False):
                     with torch.inference_mode():
                         batch_vmetrics = process_batch(vbatch)
+
                     for k, v in batch_vmetrics.items():
                         vmetrics[k] += [torch.as_tensor(v)]
                 vmetrics = {
                     k: torch.stack(v).mean().item() for k, v in vmetrics.items()
                 }
-
                 for k, v in vmetrics.items():
                     writer.add_scalar(f"val/{k}", v, step)
 
+                # Teacher forced samples for monitoring
                 with torch.inference_mode():
                     waveforms = sbatch.waveforms[..., :-1].to(device)
                     sampled = model(waveforms).softmax(-1).argmax(-1)
@@ -214,6 +218,7 @@ def train(dims: WavenetDims, training_config: TrainingConfig):
                 for i, s in enumerate(sampled):
                     log_waveform(s.unsqueeze(0), tag=f"val/{i}", step=step)
 
+                # Save Checkpoints
                 checkpoint = Checkpoint(
                     dims=dims,
                     training_config=training_config,
