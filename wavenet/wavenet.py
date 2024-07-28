@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from wavenet.data import MuLaw, Tokenizer
-from dataclasses import dataclass
 from tqdm import tqdm
+from dataclasses import dataclass
+from data.utils import MuLaw, Tokenizer
 
 
 @dataclass
